@@ -48,6 +48,8 @@ class GatewayService : Service() {
         } catch (_: Exception) { if (running.get()) { running.set(false); stopSelf() } }
     }
     private fun handleControl(socket: Socket) {
+        var clientId: String? = null
+        var client: Client? = null
         var listener: ServerSocket? = null
         try {
             socket.tcpNoDelay = true
@@ -59,22 +61,24 @@ class GatewayService : Service() {
             val id = parts[1]
             val remotePort = parts[2].toIntOrNull() ?: return
             if (!id.matches(Regex("[A-Za-z0-9_-]{1,32}")) || remotePort !in 18000..18999) return
-            val client = Client(id, remotePort, output)
-            clients[id]?.let { try { it.writer.close() } catch (_: Exception) {} }
-            clients[id] = client
+            clientId = id
+            val registered = Client(id, remotePort, output)
+            client = registered
+            clients[id]?.let { old -> try { old.writer.close() } catch (_: Exception) {} }
+            clients[id] = registered
             output.write("OK\n"); output.flush()
-            listener = ServerSocket(remotePort, 50, InetAddress.getByName("0.0.0.0"))
-            val activeListener = listener
+            val publicListener = ServerSocket(remotePort, 50, InetAddress.getByName("0.0.0.0"))
+            listener = publicListener
             pool.execute {
                 try {
-                    while (running.get() && clients[id] === client) {
-                        val external = activeListener.accept()
+                    while (running.get() && clients[id] === registered) {
+                        val external = publicListener.accept()
                         val cid = java.util.UUID.randomUUID().toString().replace("-", "")
                         pending[cid] = external
                         synchronized(output) { output.write("OPEN|$cid\n"); output.flush() }
                         pool.execute { try { Thread.sleep(30000); pending.remove(cid)?.close() } catch (_: Exception) {} }
                     }
-                } catch (_: Exception) { } finally { try { activeListener.close() } catch (_: Exception) {} }
+                } catch (_: Exception) { } finally { try { publicListener.close() } catch (_: Exception) {} }
             }
             while (running.get() && !socket.isClosed) {
                 val line = readLine(input) ?: break
@@ -82,8 +86,7 @@ class GatewayService : Service() {
             }
         } catch (_: Exception) {
         } finally {
-            val id = clients.entries.firstOrNull { it.value.writer === runCatching { BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8)) }.getOrNull() }?.key
-            if (id != null) clients.remove(id)
+            if (clientId != null && client != null) clients.remove(clientId, client)
             try { listener?.close() } catch (_: Exception) {}
             try { socket.close() } catch (_: Exception) {}
         }
